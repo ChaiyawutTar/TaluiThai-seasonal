@@ -1,0 +1,36 @@
+# Byte-compiled / optimized / DLL files
+__pycache__/
+*.py[cod]
+*$py.class
+
+
+# Virtual environment
+venv/
+.env/
+.venv/
+ENV/
+
+# Jupyter Notebook checkpoints
+
+# Pytest cache
+.pytest_cache/
+
+# VSCode settings
+.vscode/
+
+# MacOS / Linux / Windows system files
+.DS_Store
+Thumbs.db
+
+# Environment variable files
+*.env
+
+# Logs
+*.log
+
+# Model artifacts
+
+mlruns/
+
+models_save/*
+!models_save/.gitkeep

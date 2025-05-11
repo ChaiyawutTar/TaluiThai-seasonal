@@ -1,0 +1,11 @@
+pandas
+numpy
+scikit-learn
+tensorflow
+torch
+mlflow
+joblib
+Flask
+waitress
+flask-cors
+pytest
