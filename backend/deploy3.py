@@ -10,6 +10,8 @@ from tensorflow.keras.preprocessing.text import Tokenizer
 from tensorflow.keras.preprocessing.sequence import pad_sequences
 from mlflow.models.signature import infer_signature
 
+import sys
+import time
 import torch
 import torch.nn as nn
 import torch.optim as optim
@@ -113,9 +115,24 @@ def clean_season_string(season_str):
     try: return eval(str(season_str))
     except: return ['unknown']
 
+def log_batch_metrics(metrics_dict, step=None):
+    """Log multiple metrics at once to reduce API calls"""
+    # Sanitize metric names by replacing @ with _at_
+    sanitized_metrics = {}
+    for key, value in metrics_dict.items():
+        sanitized_key = key.replace('@', '_at_')
+        sanitized_metrics[sanitized_key] = value
+
+    mlflow.log_metrics(sanitized_metrics, step=step)
+
+def log_batch_params(params_dict):
+    """Log multiple parameters at once to reduce API calls"""
+    mlflow.log_params(params_dict)
+
 # --- Main Script Execution ---
 if __name__ == '__main__':
     print("--- Loading and Preprocessing Data ---")
+    start_time = time.time()
     try:
         df_all = pd.read_csv(DATA_FILE_PATH)
         print(f"Successfully loaded {DATA_FILE_PATH}. Shape: {df_all.shape}")
@@ -241,15 +258,29 @@ if __name__ == '__main__':
         print(f"MLflow Run ID: {run_id}")
         current_model_save_path = f"./models_save/{MODEL_SAVE_PATH_BASE}_{run_id}.pth"
 
-        # Log parameters
-        mlflow.log_param("data_file_path", DATA_FILE_PATH)
-        mlflow.log_param("max_words", MAX_WORDS)
-        mlflow.log_param("max_sequence_length", MAX_SEQUENCE_LENGTH)
-        mlflow.log_param("batch_size", BATCH_SIZE)
-        mlflow.log_param("num_epochs", NUM_EPOCHS)
-        mlflow.log_param("learning_rate", LEARNING_RATE)
-        for key, value in MODEL_PARAMS.items(): mlflow.log_param(key, value)
-        mlflow.log_artifact(PREPROCESSOR_SAVE_PATH) # Log the saved preprocessors
+        # Log parameters in batches
+        params_dict = {
+            "data_file_path": DATA_FILE_PATH,
+            "max_words": MAX_WORDS,
+            "max_sequence_length": MAX_SEQUENCE_LENGTH,
+            "batch_size": BATCH_SIZE,
+            "num_epochs": NUM_EPOCHS,
+            "learning_rate": LEARNING_RATE,
+            "dataset_size": len(df_train_expanded),
+            "train_size": len(train_indices),
+            "val_size": len(val_indices),
+            "vocab_size": VOCAB_SIZE,
+            "num_categories": NUM_CATEGORIES,
+            "location_input_dim": LOCATION_INPUT_DIM,
+            "item_season_input_dim": ITEM_SEASON_INPUT_DIM,
+            "query_season_input_dim": QUERY_SEASON_INPUT_DIM
+        }
+        # Add model parameters to params_dict
+        for key, value in MODEL_PARAMS.items():
+            params_dict[key] = value
+
+        log_batch_params(params_dict)
+        mlflow.log_artifact(PREPROCESSOR_SAVE_PATH)
 
         # Initialize model
         model = ContextualMultiModalRecommenderPyTorch(
@@ -279,7 +310,6 @@ if __name__ == '__main__':
                 optimizer.step()
                 total_train_loss += loss.item()
             avg_train_loss = total_train_loss / len(train_loader)
-            mlflow.log_metric("train_loss", avg_train_loss, step=epoch)
 
             # Validation phase
             model.eval()
@@ -292,50 +322,93 @@ if __name__ == '__main__':
                     loss_val = criterion(outputs_val, b_labels_v)
                     total_val_loss += loss_val.item()
             avg_val_loss = total_val_loss / len(val_loader)
-            mlflow.log_metric("val_loss", avg_val_loss, step=epoch)
+
+            # Log metrics in batch
+            metrics_dict = {
+                "train_loss": avg_train_loss,
+                "val_loss": avg_val_loss,
+                "train_val_diff": avg_train_loss - avg_val_loss
+            }
+            log_batch_metrics(metrics_dict, step=epoch)
+
             print(f"Epoch {epoch+1}/{NUM_EPOCHS} -> Train Loss: {avg_train_loss:.4f}, Val Loss: {avg_val_loss:.4f}")
             if avg_val_loss < best_val_loss:
                 best_val_loss = avg_val_loss
-                torch.save(model.state_dict(), current_model_save_path) # Save model with run_id
+                torch.save(model.state_dict(), current_model_save_path)
                 print(f"  Model improved and saved to {current_model_save_path}")
+                # Log model checkpoint as artifact
+                mlflow.log_artifact(current_model_save_path, "checkpoints")
 
         # Load the best model for evaluation
         print("\n--- Loading best model for evaluation ---")
         model.load_state_dict(torch.load(current_model_save_path))
         model.eval()
-        
+
         # Run evaluation metrics
-        add_evaluation_to_training(
-            model, 
-            X_text_val, X_loc_val, X_item_s_val, X_cat_val, X_query_s_val, 
+        evaluation_metrics = add_evaluation_to_training(
+            model,
+            X_text_val, X_loc_val, X_item_s_val, X_cat_val, X_query_s_val,
             y_val, attraction_ids_val,
-            device, 
+            device,
             batch_size=BATCH_SIZE,
-            run_id=run_id
+            run_id=run_id,
+            return_metrics=True  # Modify your function to return metrics
         )
+
+        # Log all evaluation metrics in one batch if returned
+        if evaluation_metrics:
+            log_batch_metrics(evaluation_metrics)
 
         # Log the model to MLflow
         input_example = (
-            torch.randint(0, VOCAB_SIZE, (1, MAX_SEQUENCE_LENGTH)).to(device),       
-            torch.rand(1, LOCATION_INPUT_DIM).to(device),                            # b_loc
-            torch.rand(1, ITEM_SEASON_INPUT_DIM).to(device),                         # b_item_s
-            torch.randint(0, NUM_CATEGORIES, (1,)).to(device),                       # b_cat
-            torch.rand(1, QUERY_SEASON_INPUT_DIM).to(device)                         # b_query_s
+            torch.randint(0, VOCAB_SIZE, (1, MAX_SEQUENCE_LENGTH)).to(device),
+            torch.rand(1, LOCATION_INPUT_DIM).to(device),
+            torch.rand(1, ITEM_SEASON_INPUT_DIM).to(device),
+            torch.randint(0, NUM_CATEGORIES, (1,)).to(device),
+            torch.rand(1, QUERY_SEASON_INPUT_DIM).to(device)
         )
 
         example_output = model(*input_example)
         signature = infer_signature(input_example, example_output)
-        mlflow.pytorch.log_model(model, "recommender_model", registered_model_name="ContextualRecommenderPyTorch", signature=signature)
-        mlflow.log_metric("best_val_loss", best_val_loss)
+
+        # Log model with more metadata
+        mlflow.pytorch.log_model(
+            model,
+            "recommender_model",
+            registered_model_name="ContextualRecommenderPyTorch",
+            signature=signature,
+            conda_env={
+                "name": "recommender_env",
+                "channels": ["defaults", "conda-forge"],
+                "dependencies": [
+                    f"python={'.'.join(map(str, tuple(sys.version_info)[:2]))}",
+                    "pip",
+                    {"pip": [
+                        "torch>=1.9.0",
+                        "numpy>=1.19.0",
+                        "pandas>=1.3.0",
+                        "scikit-learn>=0.24.0",
+                        "tensorflow>=2.5.0",
+                        "mlflow>=1.20.0"
+                    ]}
+                ]
+            }
+        )
+
+        # Log final metrics
+        log_batch_metrics({"best_val_loss": best_val_loss})
+
+        # Log system info
+        system_metrics = {
+            "device": str(device),
+            "cuda_available": torch.cuda.is_available(),
+            "cuda_device_count": torch.cuda.device_count() if torch.cuda.is_available() else 0,
+            "training_duration_minutes": (time.time() - start_time) / 60
+        }
+        if torch.cuda.is_available():
+            system_metrics["cuda_device_name"] = torch.cuda.get_device_name(0)
+            system_metrics["cuda_memory_allocated_gb"] = torch.cuda.memory_allocated(0) / 1e9
+
+        log_batch_params(system_metrics)
+
         print(f"\n--- Training Complete. Best model for Run ID {run_id} saved to {current_model_save_path} ---")
-        
-        # Create a test set for final evaluation if needed
-        # Here you could create a separate test set or use a portion of validation data
-        
-        print("\n--- Final Model Evaluation ---")
-        print("The model has been evaluated using the following metrics:")
-        print("- Precision@k: Proportion of recommended items that are relevant")
-        print("- Recall@k: Proportion of relevant items that are recommended")
-        print("- NDCG@k: Normalized Discounted Cumulative Gain (measures ranking quality)")
-        print("- MRR: Mean Reciprocal Rank (position of first relevant item)")
-        print("These metrics provide a complete picture of recommendation quality.")

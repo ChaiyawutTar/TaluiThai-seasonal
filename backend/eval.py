@@ -209,32 +209,41 @@ def log_evaluation_metrics(metrics, run_id=None):
 
 # Add this code to the end of your training script, after the model is trained
 
-def add_evaluation_to_training(model, X_text_val, X_loc_val, X_item_s_val, X_cat_val, X_query_s_val, y_val, 
-                               attraction_ids_val, device, batch_size=64, run_id=None):
+def add_evaluation_to_training(model, X_text_val, X_loc_val, X_item_s_val, X_cat_val, X_query_s_val, y_val,
+                               attraction_ids_val, device, batch_size=64, run_id=None, return_metrics=False):
     """
     Add evaluation metrics to an already trained model.
-    
-    Args:
-        model: The trained PyTorch model
-        X_text_val, X_loc_val, X_item_s_val, X_cat_val, X_query_s_val: Validation features
-        y_val: Validation labels
-        attraction_ids_val: Attraction IDs for validation data
-        device: Computing device (cpu or cuda)
-        batch_size: Batch size for evaluation
-        run_id: Optional MLflow run ID
     """
-    print("\\n--- Evaluating Model with Recommendation Metrics ---")
-    
+    print("\n--- Evaluating Model with Recommendation Metrics ---")
+
     # Prepare validation data
     test_data = (X_text_val, X_loc_val, X_item_s_val, X_cat_val, X_query_s_val, y_val)
-    
+
     # Calculate metrics
     metrics = evaluate_model_with_metrics(
-        model, test_data, attraction_ids_val, batch_size=batch_size, 
+        model, test_data, attraction_ids_val, batch_size=batch_size,
         k_values=[1, 5, 10, 20], device=device
     )
-    
+
+    # Sanitize metric names for MLflow
+    sanitized_metrics = {}
+    for key, value in metrics.items():
+        sanitized_key = key.replace('@', '_at_')
+        sanitized_metrics[sanitized_key] = value
+
     # Log metrics to MLflow
-    log_evaluation_metrics(metrics, run_id)
-    
-    return metrics
+    if run_id:
+        with mlflow.start_run(run_id=run_id, nested=True):
+            for metric_name, value in sanitized_metrics.items():
+                mlflow.log_metric(metric_name, value)
+    else:
+        for metric_name, value in sanitized_metrics.items():
+            mlflow.log_metric(metric_name, value)
+
+    print("Logged evaluation metrics to MLflow:")
+    for metric_name, value in metrics.items():
+        print(f"  {metric_name}: {value:.4f}")
+
+    if return_metrics:
+        return sanitized_metrics
+    return None
