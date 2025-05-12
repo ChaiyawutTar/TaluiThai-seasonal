@@ -12,6 +12,7 @@ import os
 from datetime import datetime
 from tensorflow.keras.preprocessing.sequence import pad_sequences
 from flask_cors import CORS
+import csv
 
 
 # Configure logging
@@ -48,8 +49,9 @@ MODEL_PARAMS_API = None
 
 # Paths for loading artifacts
 # Update these paths to point to your actual files
+INPUT_MLFLOW_ID = str(input("Please give mlflow run id: "))
 DATA_FILE_PATH_API = os.getenv('DATA_FILE_PATH', 'allattractions_with_season.csv')
-MODEL_ARTIFACT_PATH = os.getenv('MODEL_ARTIFACT_PATH', './models_save/contextual_recommender_v4_2be6f2bdbe2d49c794f9eb760530192c.pth')
+MODEL_ARTIFACT_PATH = os.getenv('MODEL_ARTIFACT_PATH',f'./models_save/contextual_recommender_v4_{INPUT_MLFLOW_ID}.pth')
 PREPROCESSOR_ARTIFACT_PATH = os.getenv('PREPROCESSOR_ARTIFACT_PATH', 'recommender_preprocessors.joblib')
 
 # --- Model Definition ---
@@ -408,7 +410,7 @@ def recommend_api():
         processing_time = (datetime.now() - start_time).total_seconds()
         
         # Select columns for output
-        output_cols = ['ATT_NAME_TH', 'suitability_score', 'ATTR_CATAGORY_TH']
+        output_cols = ['ATT_NAME_TH', 'suitability_score', 'ATTR_CATAGORY_TH', 'ATT_LATITUDE', 'ATT_LONGITUDE']
         if 'composite_score' in recommendations_df.columns:
             output_cols.append('composite_score')
         if 'distance_km' in recommendations_df.columns:
@@ -442,6 +444,41 @@ def health_check():
         "data_rows": len(df_all_api) if df_all_api is not None else 0,
         "device": str(device_api)
     })
+
+RATINGS_CSV_PATH = 'user_ratings.csv'
+
+@app.route('/api/rate', methods=['POST'])
+def rate_attraction():
+    """API endpoint for saving user ratings."""
+    if not request.is_json:
+        return jsonify({"error": "Request must be JSON"}), 400
+
+    data = request.get_json()
+    required_fields = ['ATT_NAME_TH', 'ATT_LATITUDE', 'ATT_LONGITUDE', 'rating']
+    if not all(field in data for field in required_fields):
+        return jsonify({"error": f"Missing one of required fields: {required_fields}"}), 400
+
+    try:
+        att_name = data['ATT_NAME_TH']
+        lat = float(data['ATT_LATITUDE'])
+        lon = float(data['ATT_LONGITUDE'])
+        rating = int(data['rating'])
+        timestamp = datetime.now().isoformat()
+
+        # Append to CSV file
+        file_exists = os.path.isfile(RATINGS_CSV_PATH)
+        with open(RATINGS_CSV_PATH, mode='a', newline='', encoding='utf-8') as f:
+            writer = csv.writer(f)
+            if not file_exists:
+                writer.writerow(['ATT_NAME_TH', 'ATT_LATITUDE', 'ATT_LONGITUDE', 'rating', 'timestamp'])
+            writer.writerow([att_name, lat, lon, rating, timestamp])
+
+        logger.info(f"Saved rating {rating} for {att_name}")
+        return jsonify({"success": True, "message": "Rating saved successfully"}), 200
+
+    except Exception as e:
+        logger.error(f"Error saving rating: {e}")
+        return jsonify({"error": "Failed to save rating", "details": str(e)}), 500
 
 # --- Application Entry Point ---
 if __name__ == '__main__':

@@ -1,6 +1,8 @@
+// components/recommendation-card.tsx
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card"
 import { Badge } from "@/components/ui/badge"
 import { MapPin, Star } from "lucide-react"
+import StarRating from "./star-rating"
 
 interface RecommendationProps {
   recommendation: {
@@ -9,11 +11,21 @@ interface RecommendationProps {
     ATTR_CATAGORY_TH: string
     composite_score?: number
     distance_km?: number
+    ATT_LATITUDE: number
+    ATT_LONGITUDE: number
   }
 }
 
 export default function RecommendationCard({ recommendation }: RecommendationProps) {
-  const { ATT_NAME_TH, suitability_score, ATTR_CATAGORY_TH, composite_score, distance_km } = recommendation
+  const { 
+    ATT_NAME_TH, 
+    suitability_score, 
+    ATTR_CATAGORY_TH, 
+    composite_score, 
+    distance_km,
+    ATT_LATITUDE,
+    ATT_LONGITUDE
+  } = recommendation
 
   // Format scores as percentages
   const formatScore = (score: number) => {
@@ -57,6 +69,14 @@ export default function RecommendationCard({ recommendation }: RecommendationPro
               <span className="text-sm">Distance: {formatDistance(distance_km)}</span>
             </div>
           )}
+          
+          <div className="border-t border-gray-100 pt-3">
+            <StarRating 
+              attractionName={ATT_NAME_TH}
+              latitude={ATT_LATITUDE}
+              longitude={ATT_LONGITUDE}
+            />
+          </div>
         </div>
       </CardContent>
     </Card>

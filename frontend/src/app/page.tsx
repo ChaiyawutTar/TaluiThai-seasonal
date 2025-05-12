@@ -19,6 +19,8 @@ interface Recommendation {
   ATTR_CATAGORY_TH: string
   composite_score?: number
   distance_km?: number
+  ATT_LATITUDE: number
+  ATT_LONGITUDE: number
 }
 
 interface Season {

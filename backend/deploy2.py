@@ -35,12 +35,12 @@ LEARNING_RATE = 0.001
 
 # Model hyperparameters (these will be logged by MLflow)
 MODEL_PARAMS = {
-    "text_embedding_dim": 300,
-    "category_embedding_dim": 50,
-    "conv_filters": 256,
-    "kernel_size": 7,
-    "dense_units_module": 128,
-    "shared_dense_units": 256,
+    "text_embedding_dim": 50,
+    "category_embedding_dim": 10,
+    "conv_filters": 64,
+    "kernel_size": 3,
+    "dense_units_module": 32,
+    "shared_dense_units": 128,
     "dropout_rate": 0.2
 }
 
@@ -297,6 +297,6 @@ if __name__ == '__main__':
 
         example_output = model(*input_example)
         signature = infer_signature(input_example, example_output)
-        mlflow.pytorch.log_model(model, "recommender_model", registered_model_name="ContextualRecommenderPyTorch_hyper2", signature=signature)
+        mlflow.pytorch.log_model(model, "recommender_model", registered_model_name="ContextualRecommenderPyTorch_hyper_3", signature=signature)
         mlflow.log_metric("best_val_loss", best_val_loss)
         print(f"\n--- Training Complete. Best model for Run ID {run_id} saved to {current_model_save_path} ---")
