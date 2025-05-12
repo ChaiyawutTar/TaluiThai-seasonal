@@ -43,15 +43,14 @@
    - Output: `allattractions_with_season.csv`
 
 2. **Model Training**:
-   - Run the deployment script to train models
-   - Models will be tracked with MLflow
-   
    ```
    cd backend
    python deploy3.py
    
    // This will get MLflow ID 
    ```
+   - Run the deployment script to train models
+   - Models will be tracked with MLflow
 
 3. **Start API Server**:
    ```
