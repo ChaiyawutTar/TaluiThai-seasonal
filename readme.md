@@ -45,11 +45,17 @@
 2. **Model Training**:
    - Run the deployment script to train models
    - Models will be tracked with MLflow
+   ```
+   cd backend
+   python deploy3.py
+   
+   // This will get MLflow ID 
+   ```
 
 3. **Start API Server**:
    ```
    cd backend
-   python app2.py
+   python app2.py <MLflow ID>
    ```
    - Access the API at http://localhost:5004
    - You'll need to input your MLflow model ID
