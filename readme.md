@@ -45,6 +45,7 @@
 2. **Model Training**:
    - Run the deployment script to train models
    - Models will be tracked with MLflow
+   
    ```
    cd backend
    python deploy3.py
