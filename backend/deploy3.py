@@ -64,41 +64,104 @@ class ContextualMultiModalRecommenderPyTorch(nn.Module):
                  conv_filters, kernel_size,
                  dense_units, shared_dense_units, dropout_rate):
         super(ContextualMultiModalRecommenderPyTorch, self).__init__()
+
+        # Text processing branch
         self.embedding_text = nn.Embedding(vocab_size, text_embedding_dim, padding_idx=0)
-        self.conv_text = nn.Conv1d(in_channels=text_embedding_dim, out_channels=conv_filters, kernel_size=kernel_size)
-        self.relu_conv = nn.ReLU()
-        self.dense_location1 = nn.Linear(location_input_dim, dense_units)
-        self.relu_loc = nn.ReLU()
+        self.conv1_text = nn.Conv1d(text_embedding_dim, conv_filters, kernel_size=3)
+        self.conv2_text = nn.Conv1d(text_embedding_dim, conv_filters, kernel_size=4)  # Changed input channels
+        self.conv3_text = nn.Conv1d(text_embedding_dim, conv_filters, kernel_size=5)  # Changed input channels
+        self.text_dropout = nn.Dropout(dropout_rate)
+
+        # Location processing branch with more units
+        self.dense_location1 = nn.Linear(location_input_dim, dense_units*2)
+        self.dense_location2 = nn.Linear(dense_units*2, dense_units)
+        self.loc_bn = nn.BatchNorm1d(dense_units)
+
+        # Season processing branches
         self.dense_item_season1 = nn.Linear(item_season_input_dim, dense_units)
-        self.relu_item_season = nn.ReLU()
+        self.item_season_bn = nn.BatchNorm1d(dense_units)
+
+        self.dense_query_season1 = nn.Linear(query_season_input_dim, dense_units)
+        self.query_season_bn = nn.BatchNorm1d(dense_units)
+
+        # Category processing branch
         self.embedding_category = nn.Embedding(num_categories, category_embedding_dim)
         self.dense_category1 = nn.Linear(category_embedding_dim, dense_units)
-        self.relu_cat = nn.ReLU()
-        self.dense_query_season1 = nn.Linear(query_season_input_dim, dense_units)
-        self.relu_query_season = nn.ReLU()
-        combined_feature_size = conv_filters + (dense_units * 4)
+        self.category_bn = nn.BatchNorm1d(dense_units)
+
+        # Combined processing
+        combined_feature_size = conv_filters*3 + dense_units*4
+
+        # Deeper network for combined features
         self.fc1 = nn.Linear(combined_feature_size, shared_dense_units)
-        self.relu_fc1 = nn.ReLU()
+        self.bn1 = nn.BatchNorm1d(shared_dense_units)
         self.dropout1 = nn.Dropout(dropout_rate)
+
         self.fc2 = nn.Linear(shared_dense_units, shared_dense_units // 2)
-        self.relu_fc2 = nn.ReLU()
+        self.bn2 = nn.BatchNorm1d(shared_dense_units // 2)
         self.dropout2 = nn.Dropout(dropout_rate)
-        self.output_layer = nn.Linear(shared_dense_units // 2, 1)
+
+        self.fc3 = nn.Linear(shared_dense_units // 2, shared_dense_units // 4)
+        self.bn3 = nn.BatchNorm1d(shared_dense_units // 4)
+        self.dropout3 = nn.Dropout(dropout_rate/2)
+
+        self.output_layer = nn.Linear(shared_dense_units // 4, 1)
+
+        # Activation functions
+        self.relu = nn.ReLU()
+        self.leaky_relu = nn.LeakyReLU(0.1)
 
     def forward(self, text, location, item_season_features, category, query_season_features):
+        # Text processing with multi-scale convolutions
         x_text = self.embedding_text(text).permute(0, 2, 1)
-        x_text = self.relu_conv(self.conv_text(x_text))
-        x_text = torch.max(x_text, dim=2)[0]
-        x_loc = self.relu_loc(self.dense_location1(location))
-        x_item_season = self.relu_item_season(self.dense_item_season1(item_season_features))
-        x_cat = self.embedding_category(category)
-        x_cat = self.relu_cat(self.dense_category1(x_cat))
-        x_query_season = self.relu_query_season(self.dense_query_season1(query_season_features))
-        combined = torch.cat((x_text, x_loc, x_item_season, x_cat, x_query_season), dim=1)
-        x = self.dropout1(self.relu_fc1(self.fc1(combined)))
-        x = self.dropout2(self.relu_fc2(self.fc2(x)))
-        return self.output_layer(x)
 
+        # Apply each conv layer to the original text embedding
+        x_text1 = self.relu(self.conv1_text(x_text))
+        x_text2 = self.relu(self.conv2_text(x_text))  # Now using x_text directly
+        x_text3 = self.relu(self.conv3_text(x_text))  # Now using x_text directly
+
+        x_text1 = torch.max(x_text1, dim=2)[0]
+        x_text2 = torch.max(x_text2, dim=2)[0]
+        x_text3 = torch.max(x_text3, dim=2)[0]
+
+        x_text = torch.cat([x_text1, x_text2, x_text3], dim=1)
+        x_text = self.text_dropout(x_text)
+
+        # Location processing
+        x_loc = self.leaky_relu(self.dense_location1(location))
+        x_loc = self.leaky_relu(self.dense_location2(x_loc))
+        x_loc = self.loc_bn(x_loc)
+
+        # Season processing
+        x_item_season = self.leaky_relu(self.dense_item_season1(item_season_features))
+        x_item_season = self.item_season_bn(x_item_season)
+
+        x_query_season = self.leaky_relu(self.dense_query_season1(query_season_features))
+        x_query_season = self.query_season_bn(x_query_season)
+
+        # Category processing
+        x_cat = self.embedding_category(category)
+        x_cat = self.leaky_relu(self.dense_category1(x_cat))
+        x_cat = self.category_bn(x_cat)
+
+        # Combine all features
+        combined = torch.cat((x_text, x_loc, x_item_season, x_cat, x_query_season), dim=1)
+
+        # Deep network for combined features
+        x = self.leaky_relu(self.fc1(combined))
+        x = self.bn1(x)
+        x = self.dropout1(x)
+
+        x = self.leaky_relu(self.fc2(x))
+        x = self.bn2(x)
+        x = self.dropout2(x)
+
+        x = self.leaky_relu(self.fc3(x))
+        x = self.bn3(x)
+        x = self.dropout3(x)
+
+        return self.output_layer(x)
+    
 # --- Helper Functions ---
 def parse_location(location_str):
     try:
