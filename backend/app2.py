@@ -14,7 +14,6 @@ from tensorflow.keras.preprocessing.sequence import pad_sequences
 from flask_cors import CORS
 import csv
 
-
 # Configure logging
 logging.basicConfig(
     level=logging.INFO,
@@ -27,10 +26,10 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 # --- Global Variables & Configuration for API ---
-# These will be populated by load_artifacts()
 device_api = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 logger.info(f"API using device: {device_api}")
 
+# These will be populated by load_artifacts()
 loaded_model_api = None
 df_all_api = None
 tokenizer_api = None
@@ -48,10 +47,7 @@ MAX_SEQUENCE_LENGTH_API = None
 MODEL_PARAMS_API = None
 
 # Paths for loading artifacts
-# Update these paths to point to your actual files
-INPUT_MLFLOW_ID = str(input("Please give mlflow run id: "))
 DATA_FILE_PATH_API = os.getenv('DATA_FILE_PATH', 'allattractions_with_season.csv')
-MODEL_ARTIFACT_PATH = os.getenv('MODEL_ARTIFACT_PATH',f'./models_save/contextual_recommender_v4_{INPUT_MLFLOW_ID}.pth')
 PREPROCESSOR_ARTIFACT_PATH = os.getenv('PREPROCESSOR_ARTIFACT_PATH', 'recommender_preprocessors.joblib')
 
 # --- Model Definition ---
@@ -62,39 +58,102 @@ class ContextualMultiModalRecommenderPyTorch(nn.Module):
                  conv_filters, kernel_size,
                  dense_units, shared_dense_units, dropout_rate):
         super(ContextualMultiModalRecommenderPyTorch, self).__init__()
+
+        # Text processing branch
         self.embedding_text = nn.Embedding(vocab_size, text_embedding_dim, padding_idx=0)
-        self.conv_text = nn.Conv1d(in_channels=text_embedding_dim, out_channels=conv_filters, kernel_size=kernel_size)
-        self.relu_conv = nn.ReLU()
-        self.dense_location1 = nn.Linear(location_input_dim, dense_units)
-        self.relu_loc = nn.ReLU()
+        self.conv1_text = nn.Conv1d(text_embedding_dim, conv_filters, kernel_size=3)
+        self.conv2_text = nn.Conv1d(text_embedding_dim, conv_filters, kernel_size=4)
+        self.conv3_text = nn.Conv1d(text_embedding_dim, conv_filters, kernel_size=5)
+        self.text_dropout = nn.Dropout(dropout_rate)
+
+        # Location processing branch with more units
+        self.dense_location1 = nn.Linear(location_input_dim, dense_units*2)
+        self.dense_location2 = nn.Linear(dense_units*2, dense_units)
+        self.loc_bn = nn.BatchNorm1d(dense_units)
+
+        # Season processing branches
         self.dense_item_season1 = nn.Linear(item_season_input_dim, dense_units)
-        self.relu_item_season = nn.ReLU()
+        self.item_season_bn = nn.BatchNorm1d(dense_units)
+
+        self.dense_query_season1 = nn.Linear(query_season_input_dim, dense_units)
+        self.query_season_bn = nn.BatchNorm1d(dense_units)
+
+        # Category processing branch
         self.embedding_category = nn.Embedding(num_categories, category_embedding_dim)
         self.dense_category1 = nn.Linear(category_embedding_dim, dense_units)
-        self.relu_cat = nn.ReLU()
-        self.dense_query_season1 = nn.Linear(query_season_input_dim, dense_units)
-        self.relu_query_season = nn.ReLU()
-        combined_feature_size = conv_filters + (dense_units * 4)
+        self.category_bn = nn.BatchNorm1d(dense_units)
+
+        # Combined processing
+        combined_feature_size = conv_filters*3 + dense_units*4
+
+        # Deeper network for combined features
         self.fc1 = nn.Linear(combined_feature_size, shared_dense_units)
-        self.relu_fc1 = nn.ReLU()
+        self.bn1 = nn.BatchNorm1d(shared_dense_units)
         self.dropout1 = nn.Dropout(dropout_rate)
+
         self.fc2 = nn.Linear(shared_dense_units, shared_dense_units // 2)
-        self.relu_fc2 = nn.ReLU()
+        self.bn2 = nn.BatchNorm1d(shared_dense_units // 2)
         self.dropout2 = nn.Dropout(dropout_rate)
-        self.output_layer = nn.Linear(shared_dense_units // 2, 1)
+
+        self.fc3 = nn.Linear(shared_dense_units // 2, shared_dense_units // 4)
+        self.bn3 = nn.BatchNorm1d(shared_dense_units // 4)
+        self.dropout3 = nn.Dropout(dropout_rate/2)
+
+        self.output_layer = nn.Linear(shared_dense_units // 4, 1)
+
+        # Activation functions
+        self.relu = nn.ReLU()
+        self.leaky_relu = nn.LeakyReLU(0.1)
 
     def forward(self, text, location, item_season_features, category, query_season_features):
+        # Text processing with multi-scale convolutions
         x_text = self.embedding_text(text).permute(0, 2, 1)
-        x_text = self.relu_conv(self.conv_text(x_text))
-        x_text = torch.max(x_text, dim=2)[0]
-        x_loc = self.relu_loc(self.dense_location1(location))
-        x_item_season = self.relu_item_season(self.dense_item_season1(item_season_features))
+
+        # Apply each conv layer to the original text embedding
+        x_text1 = self.relu(self.conv1_text(x_text))
+        x_text2 = self.relu(self.conv2_text(x_text))
+        x_text3 = self.relu(self.conv3_text(x_text))
+
+        x_text1 = torch.max(x_text1, dim=2)[0]
+        x_text2 = torch.max(x_text2, dim=2)[0]
+        x_text3 = torch.max(x_text3, dim=2)[0]
+
+        x_text = torch.cat([x_text1, x_text2, x_text3], dim=1)
+        x_text = self.text_dropout(x_text)
+
+        # Location processing
+        x_loc = self.leaky_relu(self.dense_location1(location))
+        x_loc = self.leaky_relu(self.dense_location2(x_loc))
+        x_loc = self.loc_bn(x_loc)
+
+        # Season processing
+        x_item_season = self.leaky_relu(self.dense_item_season1(item_season_features))
+        x_item_season = self.item_season_bn(x_item_season)
+
+        x_query_season = self.leaky_relu(self.dense_query_season1(query_season_features))
+        x_query_season = self.query_season_bn(x_query_season)
+
+        # Category processing
         x_cat = self.embedding_category(category)
-        x_cat = self.relu_cat(self.dense_category1(x_cat))
-        x_query_season = self.relu_query_season(self.dense_query_season1(query_season_features))
+        x_cat = self.leaky_relu(self.dense_category1(x_cat))
+        x_cat = self.category_bn(x_cat)
+
+        # Combine all features
         combined = torch.cat((x_text, x_loc, x_item_season, x_cat, x_query_season), dim=1)
-        x = self.dropout1(self.relu_fc1(self.fc1(combined)))
-        x = self.dropout2(self.relu_fc2(self.fc2(x)))
+
+        # Deep network for combined features
+        x = self.leaky_relu(self.fc1(combined))
+        x = self.bn1(x)
+        x = self.dropout1(x)
+
+        x = self.leaky_relu(self.fc2(x))
+        x = self.bn2(x)
+        x = self.dropout2(x)
+
+        x = self.leaky_relu(self.fc3(x))
+        x = self.bn3(x)
+        x = self.dropout3(x)
+
         return self.output_layer(x)
 
 # --- Helper Functions ---
@@ -123,7 +182,7 @@ def haversine(lat1, lon1, lat2, lon2):
     if not all(isinstance(coord, (int, float)) for coord in [lat1, lon1, lat2, lon2]):
         logger.warning(f"Invalid coordinates for haversine: {lat1}, {lon1}, {lat2}, {lon2}")
         return float('inf')
-    
+
     try:
         lat1_rad, lon1_rad, lat2_rad, lon2_rad = map(radians, [lat1, lon1, lat2, lon2])
         dlon, dlat = lon2_rad - lon1_rad, lat2_rad - lat1_rad
@@ -151,7 +210,7 @@ def load_artifacts_for_api():
         location_scaler_api = preprocessor_data['location_scaler']
         mlb_season_api = preprocessor_data['mlb_season']
         category_encoder_api = preprocessor_data['category_encoder']
-      
+
         VOCAB_SIZE_API = preprocessor_data['VOCAB_SIZE']
         LOCATION_INPUT_DIM_API = preprocessor_data['LOCATION_INPUT_DIM']
         ITEM_SEASON_INPUT_DIM_API = preprocessor_data['ITEM_SEASON_INPUT_DIM']
@@ -170,18 +229,18 @@ def load_artifacts_for_api():
     logger.info("Loading attractions data...")
     try:
         df_all_api = pd.read_csv(DATA_FILE_PATH_API)
-        
+
         # Apply minimal cleaning needed for inference
         df_all_api['ATT_DETAIL_TH'] = df_all_api['ATT_DETAIL_TH'].fillna('')
         df_all_api['ATT_LOCATION'] = df_all_api['ATT_LOCATION'].fillna('0.0,0.0')
         df_all_api['ATTR_CATAGORY_TH'] = df_all_api['ATTR_CATAGORY_TH'].fillna('Unknown')
         df_all_api['SUITABLE_SEASON'] = df_all_api['SUITABLE_SEASON'].fillna("['unknown']")
         df_all_api['ATT_NAME_TH'] = df_all_api['ATT_NAME_TH'].fillna('Unnamed Attraction')
-        
+
         # Parse and add latitude/longitude columns for distance calculations
         parsed_locs_api = df_all_api['ATT_LOCATION'].apply(lambda x: pd.Series(parse_location(x)))
         df_all_api[['ATT_LATITUDE', 'ATT_LONGITUDE']] = parsed_locs_api
-        
+
         logger.info(f"Attraction data loaded. Shape: {df_all_api.shape}")
     except FileNotFoundError:
         logger.error(f"Data file {DATA_FILE_PATH_API} not found.")
@@ -189,49 +248,57 @@ def load_artifacts_for_api():
     except Exception as e:
         logger.error(f"Error loading data: {e}")
         return False
-      
+
     logger.info("Loading trained model...")
     try:
         global loaded_model_api
+
+        # Get MLflow run ID from environment variable or prompt
+        INPUT_MLFLOW_ID = os.getenv('MLFLOW_RUN_ID')
+        if not INPUT_MLFLOW_ID:
+            INPUT_MLFLOW_ID = input("Please enter MLflow run ID: ")
+
+        MODEL_ARTIFACT_PATH = f'./models_save/contextual_recommender_v4_{INPUT_MLFLOW_ID}.pth'
+
         loaded_model_api = ContextualMultiModalRecommenderPyTorch(
-            vocab_size=VOCAB_SIZE_API, 
+            vocab_size=VOCAB_SIZE_API,
             text_embedding_dim=MODEL_PARAMS_API["text_embedding_dim"],
-            location_input_dim=LOCATION_INPUT_DIM_API, 
+            location_input_dim=LOCATION_INPUT_DIM_API,
             item_season_input_dim=ITEM_SEASON_INPUT_DIM_API,
-            query_season_input_dim=QUERY_SEASON_INPUT_DIM_API, 
+            query_season_input_dim=QUERY_SEASON_INPUT_DIM_API,
             num_categories=NUM_CATEGORIES_API,
-            category_embedding_dim=MODEL_PARAMS_API["category_embedding_dim"], 
+            category_embedding_dim=MODEL_PARAMS_API["category_embedding_dim"],
             conv_filters=MODEL_PARAMS_API["conv_filters"],
-            kernel_size=MODEL_PARAMS_API["kernel_size"], 
+            kernel_size=MODEL_PARAMS_API["kernel_size"],
             dense_units=MODEL_PARAMS_API["dense_units_module"],
-            shared_dense_units=MODEL_PARAMS_API["shared_dense_units"], 
+            shared_dense_units=MODEL_PARAMS_API["shared_dense_units"],
             dropout_rate=MODEL_PARAMS_API["dropout_rate"]
         ).to(device_api)
-        
+
         loaded_model_api.load_state_dict(torch.load(MODEL_ARTIFACT_PATH, map_location=device_api))
         loaded_model_api.eval()
         logger.info(f"Trained model loaded successfully from {MODEL_ARTIFACT_PATH}")
         return True
     except FileNotFoundError:
-        logger.error(f"Model weights file {MODEL_ARTIFACT_PATH} not found.")
+        logger.error(f"Model weights file not found.")
         return False
     except Exception as e:
         logger.error(f"Error loading model: {e}")
         return False
 
 def generate_recommendations(
-    query_season_name, 
-    user_query_location=None, 
+    query_season_name,
+    user_query_location=None,
     max_distance_km=None,
-    top_n=10, 
-    weight_suitability=0.7, 
+    top_n=10,
+    weight_suitability=0.7,
     weight_proximity=0.3
 ):
     """Generate attraction recommendations based on season and location."""
     if loaded_model_api is None:
         logger.error("Model not loaded. Cannot generate recommendations.")
         return None
-    
+
     try:
         # Convert data to tensors compatible with the model
         # Text features
@@ -250,7 +317,7 @@ def generate_recommendations(
         # Category
         temp_cat_fillna = df_all_api['ATTR_CATAGORY_TH'].fillna('Unknown')
         inf_X_cat_np = category_encoder_api.transform(temp_cat_fillna)
-      
+
         # Convert to PyTorch tensors
         inf_X_text_t = torch.LongTensor(inf_X_text_np).to(device_api)
         inf_X_loc_t = torch.FloatTensor(inf_X_loc_np).to(device_api)
@@ -278,7 +345,7 @@ def generate_recommendations(
                 outputs = loaded_model_api(b_text, b_loc, b_item_s, b_cat, b_query_s)
                 scores_batch = torch.sigmoid(outputs).squeeze().cpu().numpy()
                 all_model_scores.extend(scores_batch.tolist() if scores_batch.ndim > 0 else [scores_batch.item()])
-      
+
         # Process results
         df_results = df_all_api.copy()
         df_results['suitability_score'] = all_model_scores
@@ -290,11 +357,11 @@ def generate_recommendations(
             df_results['distance_km'] = df_results.apply(
                 lambda row: haversine(user_lat, user_lon, row['ATT_LATITUDE'], row['ATT_LONGITUDE']), axis=1
             )
-            
+
             # Normalize distances for scoring
             min_dist = df_results['distance_km'].min()
             max_dist_val = df_results[df_results['distance_km'] != float('inf')]['distance_km'].max()
-            
+
             if pd.isna(max_dist_val) or max_dist_val == min_dist:
                 df_results['normalized_distance'] = 0.0
             else:
@@ -303,26 +370,26 @@ def generate_recommendations(
                 df_results['normalized_distance'] = df_results['distance_km'].apply(
                     lambda d: min(d / cap_dist, 1.0) if d != float('inf') else 1.0
                 )
-            
+
             # Composite score combines suitability and proximity
             df_results['composite_score'] = (
-                weight_suitability * df_results['suitability_score'] + 
+                weight_suitability * df_results['suitability_score'] +
                 weight_proximity * (1 - df_results['normalized_distance'])
             )
-            
+
             # Apply maximum distance filter if specified
             if max_distance_km:
                 df_results = df_results[df_results['distance_km'] <= max_distance_km]
-            
+
             # Sort by composite score
             df_results = df_results.sort_values(by='composite_score', ascending=False)
         else:
             # No location data, sort by suitability score only
             df_results = df_results.sort_values(by='suitability_score', ascending=False)
-        
+
         # Return top N results
         return df_results.head(top_n)
-    
+
     except Exception as e:
         logger.error(f"Error generating recommendations: {e}")
         import traceback
@@ -333,7 +400,6 @@ def generate_recommendations(
 @app.route('/')
 def index():
     """Render the home page with a simple UI for recommendations."""
-    # This assumes you have an index.html template in the templates folder
     seasons = []
     if mlb_season_api:
         seasons = [s for s in mlb_season_api.classes_.tolist() if s != 'unknown' and s.strip() != '']
@@ -344,7 +410,7 @@ def get_seasons():
     """API endpoint to get available seasons."""
     if mlb_season_api is None:
         return jsonify({"error": "Model not loaded"}), 503
-    
+
     try:
         seasons = [s for s in mlb_season_api.classes_.tolist() if s != 'unknown' and s.strip() != '']
         return jsonify({"seasons": seasons})
@@ -358,18 +424,18 @@ def recommend_api():
     # Check if model and preprocessors are loaded
     if loaded_model_api is None or df_all_api is None or tokenizer_api is None:
         return jsonify({"error": "Server not ready. Model or preprocessors not loaded."}), 503
-    
+
     try:
         # Parse request data
         data = request.get_json()
         if not data:
             return jsonify({"error": "Missing JSON payload"}), 400
-        
+
         # Extract required parameters
         query_season_name = data.get('query_season_name')
         if not query_season_name:
             return jsonify({"error": "Missing 'query_season_name'"}), 400
-        
+
         # Parse optional parameters
         user_query_location = None
         user_location_str = data.get('user_query_location')
@@ -379,7 +445,7 @@ def recommend_api():
                 user_query_location = (lat, lon)
             except ValueError:
                 return jsonify({"error": "Invalid 'user_query_location' format. Use 'lat,lon'"}), 400
-        
+
         max_distance_km = data.get('max_distance_km')
         if max_distance_km is not None:
             try:
@@ -402,30 +468,30 @@ def recommend_api():
             weight_suitability=weight_suitability,
             weight_proximity=weight_proximity
         )
-        
+
         if recommendations_df is None:
             return jsonify({"error": "Failed to generate recommendations"}), 500
-        
+
         # Prepare response
         processing_time = (datetime.now() - start_time).total_seconds()
-        
+
         # Select columns for output
         output_cols = ['ATT_NAME_TH', 'suitability_score', 'ATTR_CATAGORY_TH', 'ATT_LATITUDE', 'ATT_LONGITUDE']
         if 'composite_score' in recommendations_df.columns:
             output_cols.append('composite_score')
         if 'distance_km' in recommendations_df.columns:
             output_cols.append('distance_km')
-        
+
         # Convert to list of dictionaries for JSON response
         result_list = recommendations_df[output_cols].to_dict(orient='records')
-        
+
         return jsonify({
             "query_context": data,
             "processing_time_seconds": processing_time,
             "num_results": len(result_list),
             "recommendations": result_list
         })
-    
+
     except Exception as e:
         logger.error(f"Error processing recommendation request: {e}")
         import traceback
@@ -484,10 +550,10 @@ def rate_attraction():
 if __name__ == '__main__':
     port = int(os.environ.get('PORT', 5004))
     debug_mode = os.environ.get('DEBUG', 'False').lower() == 'true'
-    
+
     if load_artifacts_for_api():
         logger.info(f"Starting API server on port {port} (debug={debug_mode})")
-        
+
         if debug_mode:
             # Use Flask's development server for debugging
             app.run(host='0.0.0.0', port=port, debug=True)

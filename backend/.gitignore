@@ -34,3 +34,8 @@ mlruns/
 
 models_save/*
 !models_save/.gitkeep
+
+assets/*
+!assets/.gitkeep
+
+backend/user_ratings.csv

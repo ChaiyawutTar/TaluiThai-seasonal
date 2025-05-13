@@ -9,6 +9,10 @@ from sklearn.preprocessing import MultiLabelBinarizer, StandardScaler, LabelEnco
 from tensorflow.keras.preprocessing.text import Tokenizer
 from tensorflow.keras.preprocessing.sequence import pad_sequences
 from mlflow.models.signature import infer_signature
+from fairness_analysis import add_fairness_analysis
+from explain import add_model_explainability
+
+
 
 import sys
 import time
@@ -19,7 +23,6 @@ from torch.utils.data import TensorDataset, DataLoader
 
 import mlflow
 import mlflow.pytorch
-# import shap # Uncomment if you have SHAP installed and want to run the SHAP part
 
 # Import the evaluation metrics module
 from eval import add_evaluation_to_training
@@ -418,10 +421,28 @@ if __name__ == '__main__':
             return_metrics=True  # Modify your function to return metrics
         )
 
-        # Log all evaluation metrics in one batch if returned
+        explainability_dir = add_model_explainability(
+            model, 
+            preprocessors, 
+            df_all, 
+            X_text_val, 
+            X_loc_val, 
+            X_item_s_val, 
+            X_cat_val, 
+            X_query_s_val, 
+            y_val, 
+            attraction_ids_val, 
+            device, 
+            run_id
+        )
+                # Log all evaluation metrics in one batch if returned
         if evaluation_metrics:
             log_batch_metrics(evaluation_metrics)
 
+        fairness_results = add_fairness_analysis(
+            df_all, model, X_text_val, X_loc_val, X_item_s_val, X_cat_val, X_query_s_val,
+            y_val, attraction_ids_val, device, preprocessors, run_id
+        )
         # Log the model to MLflow
         input_example = (
             torch.randint(0, VOCAB_SIZE, (1, MAX_SEQUENCE_LENGTH)).to(device),

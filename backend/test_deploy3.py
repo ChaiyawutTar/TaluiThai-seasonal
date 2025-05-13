@@ -86,8 +86,13 @@ class TestContextualMultiModalRecommender:
         assert model.embedding_text.num_embeddings == model_params["vocab_size"]
         assert model.embedding_text.embedding_dim == model_params["text_embedding_dim"]
 
-        assert isinstance(model.conv_text, torch.nn.Conv1d)
-        assert model.conv_text.out_channels == model_params["conv_filters"]
+        # Check multi-scale convolutions instead of a single conv_text
+        assert isinstance(model.conv1_text, torch.nn.Conv1d)
+        assert isinstance(model.conv2_text, torch.nn.Conv1d)
+        assert isinstance(model.conv3_text, torch.nn.Conv1d)
+        assert model.conv1_text.out_channels == model_params["conv_filters"]
+        assert model.conv2_text.out_channels == model_params["conv_filters"]
+        assert model.conv3_text.out_channels == model_params["conv_filters"]
 
         assert isinstance(model.dense_location1, torch.nn.Linear)
         assert model.dense_location1.in_features == model_params["location_input_dim"]
